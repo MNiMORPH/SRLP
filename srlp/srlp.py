@@ -9,7 +9,7 @@ import sys
 
 class LongProfile(object):
     """
-    Gravel-bed river long-profile solution builder and solver
+    Sand-bed river long-profile solution builder and solver
     """
 
     def __init__(self):
@@ -30,6 +30,10 @@ class LongProfile(object):
         self.ID = None
         #self.downstream_dx = None # not necessary if x_ext given
         #self.basic_constants()
+
+        # Constants for sand-bed rivers (set later)
+        self.tau_crit_bank = None # Critical stress to erode mud banks
+        self.C_f = None # Darcy-Weisbach friction factor
 
     def set_ID(self, ID):
         """
@@ -62,18 +66,23 @@ class LongProfile(object):
         self.lambda_p = 0.35
         self.rho_s = 2650.
         self.rho = 1000.
+        self.R = (self.rho_s - self.rho) / self.rho
         self.g = 9.805
         self.epsilon = 0.2 # Parker channel criterion
-        self.tau_star_c = 0.0495
-        self.phi = 3.97 # coefficient for Wong and Parker MPM
+    
+    def set_Darcy_Weisbach_friction(self, C_f):
+        self.C_f = C_f
         
-    def bedload_lumped_constants(self):
-        self.k_qs = self.phi * ((self.rho_s - self.rho)/self.rho)**.5 \
-                    * self.g**.5 * self.epsilon**1.5 * self.tau_star_c**1.5
-        self.k_b = 0.17 * self.g**(-.5) \
-                   * ((self.rho_s - self.rho)/self.rho)**(-5/3.) \
-                   * (1+self.epsilon)**(-5/3.) * self.tau_star_c**(-5/3.)
-        self.k_Qs = self.k_b * self.k_qs
+    def set_tau_crit_bank(self, tau_crit_bank):
+        self.tau_crit_bank = tau_crit_bank
+        
+    def set_D(self, D):
+        self.D = D
+    
+    def sediment_lumped_constants(self):
+        self.k_Qs = (0.05 / self.C_f**0.5) * 1/self.R**2 * \
+                    ( 1 + self.epsilon) * self.tau_crit_bank / \
+                      ( self.rho * self.g ) * (1/self.D)
         
     def set_hydrologic_constants(self, P_xA=7/4., P_AQ=0.7, P_xQ=None):
         self.P_xA = P_xA # inverse Hack exponent
@@ -252,9 +261,6 @@ class LongProfile(object):
         """
         self.U = -U # not sure this is the best -- flipping the sign
 
-    def set_niter(self, niter=3):
-        self.niter = niter
-        
     def set_Qs_input_upstream(self, Q_s_0):
         """
         S0, the boundary-condition slope, is set as a function of Q_s_0.
@@ -266,7 +272,7 @@ class LongProfile(object):
         self.Q_s_0 = Q_s_0
         # Q[0] is centerpoint of S?
         self.S0 = -self.sinuosity * ( Q_s_0 / ( self.k_Qs* self.intermittency 
-                                                * self.Q[0]) )**(6/7.)
+                                                * self.Q[0]) )
         if self.dx_isscalar:
             self.z_ext[0] = self.z[0] - self.S0 * self.dx
             #self.z_ext[0]
@@ -284,13 +290,8 @@ class LongProfile(object):
     def compute_coefficient_time_varying(self):
         if self.S0 is not None:
             self.update_z_ext_0()
-        if self.dx_isscalar:
-            self.dzdx_0_16 = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) \
-                             / (2*self.dx) )**(1/6.)
-        else:
-            self.dzdx_0_16 = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) \
-                             / self.dx_ext_2cell )**(1/6.)
-        self.C1 = self.C0 * self.dzdx_0_16 * self.Q / self.B
+        # MAYBE DON'T HAVE TO UPDATE THIS EACH TIME ANYMORE
+        self.C1 = self.C0 * self.Q / self.B
 
     def set_z_bl(self, z_bl=None):
         """
@@ -303,19 +304,21 @@ class LongProfile(object):
         else:
             self.z_bl = self.z_ext[-1]
 
+    # Return to check this
     def set_bcr_Dirichlet(self):
         #self.bcr_value = bcr
         if self.dx_isscalar:
-            self.bcr = self.z_bl * ( self.C1[-1] * 7/6. \
+            self.bcr = self.z_bl * ( self.C1[-1] \
                                      + self.dQ[-1]/self.Q[-1]/4. \
                                      - self.dB[-1]/self.B[-1]/4. )
                                      #+ self.z[-1]
         else:
-            self.bcr = self.z_bl * ( self.C1[-1] * 7/3. \
+            self.bcr = self.z_bl * ( self.C1[-1] * 2. \
                            * (-1/self.dx_ext[-2] - 1/self.dx_ext[-1]) \
                            + self.dQ[-1]/self.Q[-1] \
                            - self.dB[-1]/self.B[-1] )
         
+    # CHECK dB HERE TOO
     def set_bcl_Neumann_RHS(self):
         """
         Boundary condition on the left (conventionally upstream) side of the 
@@ -331,16 +334,17 @@ class LongProfile(object):
         """
         if self.dx_isscalar:
             self.bcl = -2 * self.dx * self.S0 * \
-                       self.C1[0] * ( 7/6. - self.dQ[0]/self.Q[0]/4. \
-                                           + self.dB[0]/self.B[0]/4.)
+                       self.C1[0] * ( 1. - self.dQ[0]/self.Q[0]/4. \
+                                         + self.dB[0]/self.B[0]/4.)
         else:
             # Give upstream cell the same width as the first cell in domain
             # 2*dx * S_0 * left_coefficients
             self.bcl = self.dx_ext_2cell[0] * self.S0 * \
-                                - self.C1[0] * ( 7/3./self.dx_ext[0]
+                                - self.C1[0] * ( 2./self.dx_ext[0]
                                 - self.dQ[0]/self.Q[0]/self.dx_ext_2cell[0]
                                 + self.dB[0]/self.B[0]/self.dx_ext_2cell[0] )
 
+    # CHECK dB HERE TOO
     def set_bcl_Neumann_LHS(self):
         """
         Boundary condition on the left (conventionally upstream) side of the 
@@ -354,9 +358,9 @@ class LongProfile(object):
               for boundary (already supplied)
         """
         if self.dx_isscalar:
-            self.right[0] = -2 * self.C1[0] * 7/6.
+            self.right[0] = -2 * self.C1[0]
         else:
-            self.right[0] = -self.C1[0] * 7/3. \
+            self.right[0] = -self.C1[0] * 2. \
                              * (1/self.dx_ext[0] + 1/self.dx_ext[1])
     
     def evolve_threshold_width_river(self, nt=1, dt=3.15E7):
@@ -374,10 +378,10 @@ class LongProfile(object):
         for ti in range(int(self.nt)):
             self.zold = self.z.copy()
             self.set_z_bl(self.z_bl + self.U * self.dt)
-            for i in range(self.niter):
-                self.build_matrices()
-                self.z_ext[1:-1] = spsolve(self.LHSmatrix, self.RHS)
-                #print self.bcl
+            # rm niter loop
+            self.build_matrices()
+            self.z_ext[1:-1] = spsolve(self.LHSmatrix, self.RHS)
+            #print self.bcl
             self.t += self.dt
             self.z = self.z_ext[1:-1].copy()
             self.dz_dt = (self.z - self.zold)/self.dt
@@ -398,11 +402,11 @@ class LongProfile(object):
         self.dt = dt # Needed to build C0, C1
         if self.dx_isscalar:
             self.C0 = self.k_Qs * self.intermittency \
-                        / ((1-self.lambda_p) * self.sinuosity**(7/6.)) \
+                        / ((1-self.lambda_p) * self.sinuosity) \
                         * self.dt / self.dx**2
         else:
             self.C0 = self.k_Qs * self.intermittency \
-                        / ((1-self.lambda_p) * self.sinuosity**(7/6.)) \
+                        / ((1-self.lambda_p) * self.sinuosity) \
                         * self.dt / self.dx_ext_2cell
 
     def build_matrices(self):
@@ -411,20 +415,20 @@ class LongProfile(object):
         """
         self.compute_coefficient_time_varying()
         if self.dx_isscalar:
-            self.left = -self.C1 * ( (7/6.) - self.dQ/self.Q/4. \
+            self.left = -self.C1 * ( self.dQ/self.Q/4. \
                         + self.dB/self.B/4.)
-            self.center = self.C1 * 2 * ( (7/6.) ) + 1.
-            self.right = -self.C1 * ( (7/6.) + self.dQ/self.Q/4. \
+            self.center = self.C1 * 2 * + 1.
+            self.right = -self.C1 * ( self.dQ/self.Q/4. \
                          - self.dB/self.B/4. )
         else:
-            self.left = -self.C1 * ( (7/3.)/self.dx_ext[:-1]
+            self.left = -self.C1 * ( 2./self.dx_ext[:-1]
                             - self.dQ/self.Q/self.dx_ext_2cell \
                             + self.dB/self.B/self.dx_ext_2cell)
-            self.center = -self.C1 * ( (7/3.) \
+            self.center = -self.C1 * ( 2. \
                                   * (-1/self.dx_ext[:-1] \
                                      -1/self.dx_ext[1:]) ) \
                                      + 1.
-            self.right = -self.C1 * ( (7/3.)/self.dx_ext[1:] # REALLY?
+            self.right = -self.C1 * ( 2./self.dx_ext[1:] # REALLY?
                             + self.dQ/self.Q/self.dx_ext_2cell \
                             - self.dB/self.B/self.dx_ext_2cell)
         # Apply boundary conditions if the segment is at the edges of the
@@ -470,7 +474,7 @@ class LongProfile(object):
         #print P_xQ
         #e = 1 + 6*(P_xB - P_xQ)/7.
         #self.zanalytical2 = (z1 - z0) * (self.x**e - x0**e)/(x1**e - x0**e) + z0
-        self.P_a = 1 + 6*(P_xB - P_xQ)/7. # beta
+        self.P_a = 1 + (P_xB - P_xQ) # beta
         self.k_a = 1/(x1**self.P_a - x0**self.P_a) * (z1 - z0) # alpha
         self.c_a = z0 - x0**self.P_a/(x1**self.P_a - x0**self.P_a) * (z1 - z0) # gamma
         self.zanalytical = self.k_a * self.x**self.P_a + self.c_a
@@ -499,9 +503,8 @@ class LongProfile(object):
         # Coefficients
         K = self.k_Qs * self.sinuosity * self.intermittency \
             / (1 - self.lambda_p) \
-            * abs(self.k_a * self.P_a)**(1/6.) \
             * self.k_xQ / self.k_xB
-        P = self.P_xQ - self.P_xB + (self.P_xB - 1.)/6.
+        P = self.P_xQ - self.P_xB
         print(P)
         # Constants of integration
         #c1 = self.U * (x0**(P+2) - x1**(P+2)) / (K*(P-2)*(self.P_a + P - 2) \
@@ -527,7 +530,7 @@ class LongProfile(object):
             self.S = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) / 
                              (self.dx_ext_2cell) ) / self.sinuosity
         self.Q_s = -np.sign( self.z_ext[2:] - self.z_ext[:-2] ) \
-                   * self.k_Qs * self.intermittency * self.Q * self.S**(7/6.)
+                   * self.k_Qs * self.intermittency * self.Q * self.S
 
     def slope_area(self, verbose=False):
         self.S = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) / (2*self.dx) )
@@ -622,10 +625,6 @@ class Network(object):
             self.RHS += list(lp.RHS)
         self.RHS = np.array(self.RHS)
 
-    def set_niter(self, niter=3):
-        # MAKE UNIFORM IN BASE CLASS
-        self.niter = niter
-
     def update_zext(self):
         # Should just do this less ad-hoc
         for lp in self.list_of_LongProfile_objects:
@@ -690,21 +689,21 @@ class Network(object):
             # Why is this not updating the network matrix?
             # And why is it that inlcuding the network matrix update
             # code below doesn't seem to change anything?s
-            for i in range(self.niter):
-                self.update_zext()
-                for lp in self.list_of_LongProfile_objects:
-                    lp.build_matrices()
-                self.build_block_diagonal_matrix_core()
-                self.add_block_diagonal_matrix_upstream_boundary_conditions()
-                self.add_block_diagonal_matrix_downstream_boundary_conditions()
-                out = spsolve(self.LHSblock_matrix, self.RHS)
-                i = 0
-                idx = 0
-                # This looks to be working -- loops to update_zext
-                for lp in self.list_of_LongProfile_objects:
-                    lp.z_ext[1:-1] = out[idx:idx+self.list_of_segment_lengths[i]]
-                    idx += +self.list_of_segment_lengths[i]
-                    i += 1
+            #for i in range(self.niter):
+            self.update_zext()
+            for lp in self.list_of_LongProfile_objects:
+                lp.build_matrices()
+            self.build_block_diagonal_matrix_core()
+            self.add_block_diagonal_matrix_upstream_boundary_conditions()
+            self.add_block_diagonal_matrix_downstream_boundary_conditions()
+            out = spsolve(self.LHSblock_matrix, self.RHS)
+            i = 0
+            idx = 0
+            # This looks to be working -- loops to update_zext
+            for lp in self.list_of_LongProfile_objects:
+                lp.z_ext[1:-1] = out[idx:idx+self.list_of_segment_lengths[i]]
+                idx += +self.list_of_segment_lengths[i]
+                i += 1
             self.update_zext()
             self.t += self.dt # Update each lp z? Should make a global class
                               # that these both inherit from
