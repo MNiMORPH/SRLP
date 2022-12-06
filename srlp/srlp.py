@@ -38,6 +38,10 @@ class LongProfile(object):
         #self.downstream_dx = None # not necessary if x_ext given
         #self.basic_constants()
 
+        # Constants for sand-bed rivers (set later)
+        self.tau_crit_bank = None # Critical stress to erode mud banks
+        self.C_f = None # Darcy-Weisbach friction factor
+
     def set_ID(self, ID):
         """
         Set the ID of this segment
@@ -69,18 +73,25 @@ class LongProfile(object):
         self.lambda_p = 0.35
         self.rho_s = 2650.
         self.rho = 1000.
+        self.R = (self.rho_s - self.rho) / self.rho
         self.g = 9.805
         self.epsilon = 0.2 # Parker channel criterion
         self.tau_star_c = 0.0495
         self.phi = 3.97 # coefficient for Wong and Parker MPM
 
-    def bedload_lumped_constants(self):
-        self.k_qs = self.phi * ((self.rho_s - self.rho)/self.rho)**.5 \
-                    * self.g**.5 * self.epsilon**1.5 * self.tau_star_c**1.5
-        self.k_b = 0.17 * self.g**(-.5) \
-                   * ((self.rho_s - self.rho)/self.rho)**(-5/3.) \
-                   * (1+self.epsilon)**(-5/3.) * self.tau_star_c**(-5/3.)
-        self.k_Qs = self.k_b * self.k_qs
+    def set_Darcy_Weisbach_friction(self, C_f):
+        self.C_f = C_f
+        
+    def set_tau_crit_bank(self, tau_crit_bank):
+        self.tau_crit_bank = tau_crit_bank
+        
+    def set_D(self, D):
+        self.D = D
+    
+    def sediment_lumped_constants(self):
+        self.k_Qs = (0.05 / self.C_f**0.5) * 1/self.R**2 * \
+                    ( 1 + self.epsilon) * self.tau_crit_bank / \
+                      ( self.rho * self.g ) * (1/self.D)
 
     def set_hydrologic_constants(self, P_xA=7/4., P_AQ=0.7, P_xQ=None):
         self.P_xA = P_xA # inverse Hack exponent
@@ -271,9 +282,6 @@ class LongProfile(object):
                 - self.gravel_fractional_loss_per_km * self.Q_s \
                 / ( (1-self.lambda_p) * self.B )
 
-    def set_niter(self, niter=3):
-        self.niter = niter
-
     def set_Qs_input_upstream(self, Q_s_0):
         """
         S0, the boundary-condition slope, is set as a function of Q_s_0.
@@ -287,7 +295,7 @@ class LongProfile(object):
         self.S0 = - np.sign(self.Q[0]) * self.sinuosity * \
                       ( np.abs(Q_s_0) / 
                         ( self.k_Qs * self.intermittency 
-                              * np.abs(self.Q[0])) )**(6/7.)
+                              * np.abs(self.Q[0])) )
         # Give upstream cell the same width as the first cell in domain
         self.z_ext[0] = self.z[0] - self.S0 * self.dx_ext[0]
 
@@ -298,9 +306,7 @@ class LongProfile(object):
     def compute_coefficient_time_varying(self):
         if self.S0 is not None:
             self.update_z_ext_0()
-        self.dzdx_0_16 = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) \
-                         / self.dx_ext_2cell )**(1/6.)
-        self.C1 = self.C0 * self.dzdx_0_16 * self.Q / self.B
+        self.C1 = self.C0 * self.Q / self.B
         # Handling C1 for networked rivers
         # Need to link the two segments without skipping the channel head
         # DOESN'T SEEM TO CHANGE ANYTHING!
@@ -308,15 +314,13 @@ class LongProfile(object):
         # ghost-node Qs,in?
         if len(self.downstream_segment_IDs) > 0:
             self.C1[-1] = self.C0[-1] \
-                          * (np.abs(self.z_ext[-2] - self.z_ext[-1]) \
-                                   /self.dx[-1])**(1/6.) \
+                          * np.abs(self.z_ext[-2] - self.z_ext[-1]) \
                           * self.Q[-1] / self.B[-1]
         # This one matters! The above doesn't!!!! (Maybe.)
         # WORK HERE. If turns to 0, fixed. But why? Stays at initial profile?
         if len(self.upstream_segment_IDs) > 0:
             self.C1[0] = self.C0[0] \
-                          * (np.abs(self.z_ext[1] - self.z_ext[0]) \
-                                   /self.dx[0])**(1/6.) \
+                          * np.abs(self.z_ext[1] - self.z_ext[0]) \
                           * self.Q[0] / self.B[0]
 
     def set_z_bl(self, z_bl):
@@ -328,7 +332,7 @@ class LongProfile(object):
         self.z_ext[-1] = self.z_bl
 
     def set_bcr_Dirichlet(self):
-        self.bcr = self.z_bl * ( self.C1[-1] * 7/3. \
+        self.bcr = self.z_bl * ( self.C1[-1] * 2. \
                        * (1/self.dx_ext[-2] + 1/self.dx_ext[-1])/2. \
                        + self.dQ[-1]/self.Q[-1] )
 
@@ -348,7 +352,7 @@ class LongProfile(object):
         # Give upstream cell the same width as the first cell in domain
         # 2*dx * S_0 * left_coefficients
         self.bcl = self.dx_ext_2cell[0] * self.S0 * \
-                            - self.C1[0] * ( 7/3./self.dx_ext[0]
+                            - self.C1[0] * ( 2./self.dx_ext[0]
                             - self.dQ[0]/self.Q[0]/self.dx_ext_2cell[0] )
 
     def set_bcl_Neumann_LHS(self):
@@ -363,7 +367,7 @@ class LongProfile(object):
         LHS = coeff_right at 0 + coeff_left at 0, with appropriate dx
               for boundary (already supplied)
         """
-        self.right[0] = -self.C1[0] * 7/3. \
+        self.right[0] = -self.C1[0] * 2. \
                          * (1/self.dx_ext[0] + 1/self.dx_ext[1])
 
     def evolve_threshold_width_river(self, nt=1, dt=3.15E7):
@@ -381,14 +385,14 @@ class LongProfile(object):
         self.set_z_bl(self.z_bl)
         for ti in range(int(self.nt)):
             self.zold = self.z.copy()
-            for i in range(self.niter):
-                # If I want to keep this, will have to add to the networked
-                # river too
-                if self.gravel_fractional_loss_per_km is not None:
-                    self.set_Sternberg_gravel_loss()
-                self.build_matrices()
-                self.z_ext[1:-1] = spsolve(self.LHSmatrix, self.RHS)
-                #print self.bcl
+            #for i in range(self.niter):
+            # If I want to keep this, will have to add to the networked
+            # river too
+            if self.gravel_fractional_loss_per_km is not None:
+                self.set_Sternberg_gravel_loss()
+            self.build_matrices()
+            self.z_ext[1:-1] = spsolve(self.LHSmatrix, self.RHS)
+            #print self.bcl
             self.t += self.dt
             self.z = self.z_ext[1:-1].copy()
             self.dz_dt = (self.z - self.zold)/self.dt
@@ -409,7 +413,7 @@ class LongProfile(object):
         """
         self.dt = dt # Needed to build C0, C1
         self.C0 = self.k_Qs * self.intermittency \
-                    / ((1-self.lambda_p) * self.sinuosity**(7/6.)) \
+                    / ((1-self.lambda_p) * self.sinuosity) \
                     * self.dt / self.dx_ext_2cell
 
     def build_matrices(self):
@@ -417,13 +421,13 @@ class LongProfile(object):
         Build the tridiagonal matrix (LHS) and the RHS matrix for the solution
         """
         self.compute_coefficient_time_varying()
-        self.left = -self.C1 * ( (7/3.)/self.dx_ext[:-1]
+        self.left = -self.C1 * ( 2./self.dx_ext[:-1]
                         - self.dQ/self.Q/self.dx_ext_2cell )
-        self.center = -self.C1 * ( (7/3.) \
+        self.center = -self.C1 * ( 2. \
                               * (-1/self.dx_ext[:-1] \
                                  -1/self.dx_ext[1:]) ) \
                                  + 1.
-        self.right = -self.C1 * ( (7/3.)/self.dx_ext[1:] # REALLY?
+        self.right = -self.C1 * ( 2./self.dx_ext[1:] # REALLY?
                         + self.dQ/self.Q/self.dx_ext_2cell )
         # Apply boundary conditions if the segment is at the edges of the
         # network (both if there is only one segment!)
@@ -468,7 +472,7 @@ class LongProfile(object):
             P_xQ = self.P_xQ
         #print P_xQ
         #self.zanalytical2 = (z1 - z0) * (self.x**e - x0**e)/(x1**e - x0**e) + z0
-        self.P_a = 1 - 6*P_xQ/7. # beta
+        self.P_a = 1 - P_xQ # beta
         self.k_a = 1/(x1**self.P_a - x0**self.P_a) * (z1 - z0) # alpha
         self.c_a = z0 - x0**self.P_a/(x1**self.P_a - x0**self.P_a) * (z1 - z0) # gamma
         self.zanalytical = self.k_a * self.x**self.P_a + self.c_a
@@ -495,7 +499,6 @@ class LongProfile(object):
         # Coefficients
         K = self.k_Qs * self.sinuosity * self.intermittency \
             / (1 - self.lambda_p) \
-            * abs(self.k_a * self.P_a)**(1/6.) \
             * self.k_xQ / self.k_xB
         P = self.P_xQ
         print(P)
@@ -519,17 +522,17 @@ class LongProfile(object):
         self.S = np.abs( (self.z_ext[2:] - self.z_ext[:-2]) /
                          (self.dx_ext_2cell) ) / self.sinuosity
         self.Q_s = -np.sign( self.z_ext[2:] - self.z_ext[:-2] ) \
-                   * self.k_Qs * self.intermittency * self.Q * self.S**(7/6.)
+                   * self.k_Qs * self.intermittency * self.Q * self.S
 
-    def compute_channel_width(self):
-        if self.D is not None:
-            self.b = 0.17 / ( self.g**.5
-                              * ((self.rho_s - self.rho)/self.rho)**(5/3.)
-                              * (1+self.epsilon)**(5/3.)
-                              * (self.tau_star_c**(5/3.)) ) \
-                            * self.Q * self.S**(7/6.) / self.D**1.5
-        else:
-            raise ValueError('Set grain size to compute channel width.')
+#    def compute_channel_width(self):
+#        if self.D is not None:
+#            self.b = 0.17 / ( self.g**.5
+#                              * ((self.rho_s - self.rho)/self.rho)**(5/3.)
+#                              * (1+self.epsilon)**(5/3.)
+#                              * (self.tau_star_c**(5/3.)) ) \
+#                            * self.Q * self.S / self.D**1.5
+#        else:
+#            raise ValueError('Set grain size to compute channel width.')
             
     def compute_flow_depth(self):
         if self.D is not None:
@@ -552,145 +555,6 @@ class LongProfile(object):
             print("k_s = ", self.ks)
             print("R2 = ", out.rvalue**2.)
 
-    def compute_diffusivity(self):
-        """
-        Compute diffusivity at each point along valley.
-        From linearized version of threshold width equation.
-        """
-        self.compute_Q_s()
-        self.diffusivity = (7./6.) * self.k_Qs * self.intermittency * self.Q * self.S**(1./6.) \
-            / self.sinuosity**(7./6.) / self.B / (1. - self.lambda_p)
-
-    def compute_equilibration_time(self):
-        """
-        Compute valley equilibration time (sensu Paola et al., 1992).
-        From scaling of linearized version of threshold width equation.
-        """
-        self.compute_diffusivity()
-        self.equilibration_time = self.L**2. / self.diffusivity.mean()
-
-    def compute_e_folding_time(self, n):
-        """
-        Compute valley e-folding times as function of wavenumber.
-        From solving linearized version of threshold width equation.
-        """
-        self.compute_equilibration_time()
-        return 1./self.diffusivity.mean()/self.wavenumber(n)**2.
-
-    def compute_wavenumber(self, n):
-        """
-        Compute wavenumber for series solutions to linearized version of
-        threshold width equation.
-        """
-        return (2*n + 1) * np.pi / 2. / self.L
-
-    def compute_series_coefficient(self, n, period):
-        """
-        Compute coefficient for series solutions to linearized version of
-        threshold width equation.
-        """
-        return 4 * np.pi * period / self.L / \
-            ((period**2.) * (self.diffusivity.mean()**2.) *
-                (self.compute_wavenumber(n)**4.) + (4.*np.pi**2.))
-
-    def compute_z_series_terms(self, period, nsum):
-        """
-        Compute amplitudes of cos(2*pi*t/P) and sin(2*pi*t/P) terms in
-        solutions to linearized version of threshold width equation.
-        """
-        cos_term = 0
-        sin_term = 0
-        for n in range(nsum):
-            coeff_cos = (np.cos(self.compute_wavenumber(n) * self.x) *
-                            self.compute_series_coefficient(n, period))
-            cos_term += coeff_cos*self.diffusivity.mean()
-            sin_term += coeff_cos*2.*np.pi/period/self.compute_wavenumber(n)**2.
-        return cos_term, sin_term
-
-    def compute_Qs_series_terms(self, period, nsum):
-        """
-        Compute amplitudes of cos(2*pi*t/P) and sin(2*pi*t/P) terms in
-        solutions to linearized version of threshold width equation.
-        """
-        cos_term = 0
-        sin_term = 0
-        for n in range(nsum):
-            coeff_sin = (np.sin(self.compute_wavenumber(n) * self.x) *
-                            self.compute_series_coefficient(n, period))
-            cos_term += coeff_sin*self.diffusivity.mean()*self.compute_wavenumber(n)
-            sin_term += coeff_sin*2.*np.pi/period/self.compute_wavenumber(n)
-        return cos_term, sin_term
-        
-    def compute_z_gain(self, period, nsum=100):
-        """
-        Compute gain (relative amplitude) between periodic forcing in sediment
-        or water supply and response in valley elevation.
-        From solving linearized version of threshold width equation.
-        """
-        self.compute_diffusivity()
-        cos_term, sin_term = self.compute_z_series_terms(period, nsum)
-        return (6./7.) * \
-            np.sqrt( ( (self.L - self.x) - sin_term)**2. + cos_term**2. ) \
-            / (self.L - self.x)
-
-    def compute_Qs_gain(self, period, A_Qs=0., A_Q=0., nsum=100):
-        """
-        Compute gain (relative amplitude) between periodic forcing in sediment
-        or water supply and response in valley elevation.
-        From solving linearized version of threshold width equation.
-        """
-        self.compute_diffusivity()
-        cos_term, sin_term = self.compute_Qs_series_terms(period, nsum)
-        return np.sqrt( (A_Qs/(A_Qs - A_Q) - sin_term)**2. + cos_term**2. ) \
-
-
-    def compute_z_lag(self, period, nsum=100):
-        """
-        Compute lag time between periodic forcing in sediment or water supply
-        and response in valley elevation.
-        From solving linearized version of threshold width equation.
-        """
-
-        # Basic calculation
-        self.compute_diffusivity()
-        cos_term, sin_term = self.compute_z_series_terms(period, nsum)
-        lag = -(period/(2.*np.pi)) * \
-                np.arctan( -cos_term / ((self.L - self.x) - sin_term) )
-
-        # Search for and correct any cycle skipping.
-        # Arctan function can only resolve -0.25 < lag/period < 0.25
-        for i in range(1,len(self.x)):
-            if lag[i] < lag[i-1] and lag[i-1] - lag[i] > period/4.:
-                lag[i:] += period/2.
-            if i != len(self.x)-1:
-                if lag[i+1] > lag[i] and lag[i+1] - lag[i] > period/4.:
-                    lag[:i+1] += period/2.
-
-        return lag
-        
-    def compute_Qs_lag(self, period, A_Qs=0., A_Q=0., nsum=1000):
-        """
-        Compute lag time between periodic forcing in sediment or water supply
-        and response in bedload sediment discharge.
-        From solving linearized version of threshold width equation.
-        """
-
-        # Basic calculation
-        self.compute_diffusivity()
-        cos_term, sin_term = self.compute_Qs_series_terms(period, nsum)
-        lag = -(period/(2.*np.pi)) * \
-                np.arctan( -cos_term / ((A_Qs/(A_Qs - A_Q) - sin_term))  )
-
-        # Search for and correct any cycle skipping.
-        # Arctan function can only resolve -0.25 < lag/period < 0.25
-        for i in range(1,len(self.x)):
-            if lag[i] < lag[i-1] and lag[i-1] - lag[i] > period/4.:
-                lag[i:] += period/2.
-            if i != len(self.x)-1:
-                if lag[i+1] > lag[i] and lag[i+1] - lag[i] > period/4.:
-                    lag[:i+1] += period/2.
-
-        return lag
 
 
 class Network(object):
@@ -747,13 +611,11 @@ class Network(object):
                 # Matrix entry, assuming net aligns with ids
                 upseg = self.list_of_LongProfile_objects[ID]
                 C0 = upseg.k_Qs * upseg.intermittency \
-                        / ((1-upseg.lambda_p) * upseg.sinuosity**(7/6.)) \
+                        / ((1-upseg.lambda_p) * upseg.sinuosity) \
                         * self.dt / (2 * lp.dx_ext[0])
                 #C0 = upseg.C0[-1] # Should be consistent
-                dzdx_0_16 = ( np.abs(lp.z_ext[1] - lp.z_ext[0])
-                              / (lp.dx_ext[0]))**(1/6.)
-                C1 = C0 * dzdx_0_16 * upseg.Q[-1] / lp.B[0]
-                left_new = -C1 * 7/6. * 2 / lp.dx_ext[0]
+                C1 = C0 * upseg.Q[-1] / lp.B[0]
+                left_new = -C1 * 2 / lp.dx_ext[0]
                 self.LHSblock_matrix[row, col] = left_new
 
     def add_block_diagonal_matrix_downstream_boundary_conditions(self):
@@ -765,12 +627,10 @@ class Network(object):
                 # Matrix entry, assuming net aligns with ids
                 downseg = self.list_of_LongProfile_objects[ID]
                 C0 = downseg.k_Qs * downseg.intermittency \
-                        / ((1-downseg.lambda_p) * downseg.sinuosity**(7/6.)) \
+                        / ((1-downseg.lambda_p) * downseg.sinuosity) \
                         * self.dt / (2 * lp.dx_ext[-1])
-                dzdx_0_16 = ( np.abs(lp.z_ext[-2] - lp.z_ext[-1])
-                              / (lp.dx_ext[0]))**(1/6.)
-                C1 = C0 * dzdx_0_16 * lp.Q[-1] / downseg.B[0]
-                right_new = -C1 * 7/6. * 2 / lp.dx_ext[-1]
+                C1 = C0 * lp.Q[-1] / downseg.B[0]
+                right_new = -C1 * 2 / lp.dx_ext[-1]
                 self.LHSblock_matrix[row, col] = right_new
 
 
@@ -794,10 +654,6 @@ class Network(object):
         for lp in self.list_of_LongProfile_objects:
             self.RHS += list(lp.RHS)
         self.RHS = np.array(self.RHS)
-
-    def set_niter(self, niter=3):
-        # MAKE UNIFORM IN BASE CLASS
-        self.niter = niter
 
     def update_zext(self):
         # Should just do this less ad-hoc
@@ -842,27 +698,27 @@ class Network(object):
             """
             self.stack_RHS_vector()
 
-            for i in range(self.niter):
-                self.update_zext()
-                for lp in self.list_of_LongProfile_objects:
-                    # Update coefficient for all: elements may call to others
-                    # within the net
-                    lp.compute_coefficient_time_varying()
-                for lp in self.list_of_LongProfile_objects:
-                    lp.build_matrices()
-                # Update semi-implicit on boundaries
-                # Commenting these two out helps solution!
-                # Don't understand why. Perhaps error in code for them?
-                #self.add_block_diagonal_matrix_upstream_boundary_conditions()
-                #self.add_block_diagonal_matrix_downstream_boundary_conditions()
-                out = spsolve(sparse.csr_matrix(self.LHSblock_matrix), self.RHS)
-                i = 0
-                idx = 0
-                for lp in self.list_of_LongProfile_objects:
-                    lp.z_ext[1:-1] = \
-                                    out[idx:idx+self.list_of_segment_lengths[i]]
-                    idx += +self.list_of_segment_lengths[i]
-                    i += 1
+            #for i in range(self.niter):
+            self.update_zext()
+            for lp in self.list_of_LongProfile_objects:
+                # Update coefficient for all: elements may call to others
+                # within the net
+                lp.compute_coefficient_time_varying()
+            for lp in self.list_of_LongProfile_objects:
+                lp.build_matrices()
+            # Update semi-implicit on boundaries
+            # Commenting these two out helps solution!
+            # Don't understand why. Perhaps error in code for them?
+            #self.add_block_diagonal_matrix_upstream_boundary_conditions()
+            #self.add_block_diagonal_matrix_downstream_boundary_conditions()
+            out = spsolve(sparse.csr_matrix(self.LHSblock_matrix), self.RHS)
+            i = 0
+            idx = 0
+            for lp in self.list_of_LongProfile_objects:
+                lp.z_ext[1:-1] = \
+                                out[idx:idx+self.list_of_segment_lengths[i]]
+                idx += +self.list_of_segment_lengths[i]
+                i += 1
             self.update_zext()
             self.t += self.dt # Update each lp z? Should make a global class
                               # that these both inherit from
